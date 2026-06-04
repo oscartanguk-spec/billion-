@@ -11,7 +11,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from backtest.stock_dataset import STOCKS
-from backtest.mb_scorer import score_both
+from backtest.mb_scorer import score_both, apply_regime_thresholds, REGIME_THRESHOLDS
 
 
 # ── 混淆矩阵工具 ──────────────────────────────────────────────────────
@@ -52,6 +52,7 @@ def main():
     results = []
     for s in STOCKS:
         scores = score_both(s)
+        scores = apply_regime_thresholds(scores, s["regime"])
         row = {**s, **scores}
         results.append(row)
 
@@ -96,7 +97,7 @@ def main():
 
     print()
     print("=" * 60)
-    print("  3x 模式（MB ≥ 0.80）汇总")
+    print("  3x 模式汇总（Regime感知阈值：R1/R2≥0.80 | R3≥0.85 | R4拒绝）")
     print("=" * 60)
     print(f"  正样本总数 : {sum(actual_3x)}")
     print(f"  负样本总数 : {len(actual_3x) - sum(actual_3x)}")
@@ -107,7 +108,7 @@ def main():
 
     print()
     print("=" * 60)
-    print("  2x 模式（MB ≥ 0.68）汇总")
+    print("  2x 模式汇总（Regime感知阈值：R1/R2≥0.68 | R3≥0.75 | R4拒绝）")
     print("=" * 60)
     print(f"  正样本总数 : {sum(actual_2x)}")
     print(f"  负样本总数 : {len(actual_2x) - sum(actual_2x)}")

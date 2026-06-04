@@ -1,6 +1,11 @@
 """
 V18.2 MB-Score 计算引擎
 实现完整的 3x 模式和 2x 模式评分
+
+V18.2-R1 变更：
+  - Runway 断点收紧：P<25%→0.65（原 P<35%），P≥25%→0.40
+  - S4_2x SCP 权重 15%→22%，Moat 权重 30%→23%
+  - 准入阈值在 run_backtest.py 中按 Regime 动态设定（R3/R4 更严格）
 """
 import math
 
@@ -39,7 +44,8 @@ def compute_s4_3x(moat: float, ovmv: float, tam: float, eco: float) -> float:
 
 def compute_s4_2x(moat: float, ovmv: float, tam: float, eco: float, scp: float) -> float:
     os = option_space_2x(ovmv)
-    return 0.30 * moat + 0.20 * os + 0.20 * tam + 0.15 * eco + 0.15 * scp
+    # SCP 权重 15%→22%，Moat 权重 30%→23%（其余不变，合计100%）
+    return 0.23 * moat + 0.20 * os + 0.20 * tam + 0.15 * eco + 0.22 * scp
 
 
 # ── PTS 主矛盾强度 ──────────────────────────────────────────────────────
@@ -48,7 +54,7 @@ _CATALYST_INTENSITY = {"S+": 1.00, "S": 0.85, "A": 0.60, "B": 0.35, "C": 0.10}
 def _runway_score(p_eff: float) -> float:
     if p_eff < 10:   return 1.00
     if p_eff < 20:   return 0.85
-    if p_eff < 35:   return 0.65
+    if p_eff < 25:   return 0.65  # 断点从 35→25，P≥25% 直接进入 0.40 区
     if p_eff < 55:   return 0.40
     return 0.15
 
@@ -108,6 +114,7 @@ def score_3x(stock: dict) -> dict:
     cat_mult = _CAT_MULT_3X.get(s["catalyst_grade"], 1.00)
     mb_score = min(1.35, mb_raw * s["resonance"] * cat_mult * secondary_mult * s["p8_adj"])
 
+    # pass_3x 使用默认阈值；Regime 感知阈值在 run_backtest.py 中覆盖
     return {
         "s3": s3, "s4": s4, "synergy": synergy, "linear": linear,
         "mb_raw": mb_raw, "pts": pts, "floor": floor,
@@ -137,6 +144,7 @@ def score_2x(stock: dict) -> dict:
     cat_mult = _CAT_MULT_2X.get(s["catalyst_grade"], 1.00)
     mb_score = min(1.35, mb_raw * s["resonance"] * cat_mult * secondary_mult * s["p8_adj"])
 
+    # pass_2x 使用默认阈值；Regime 感知阈值在 run_backtest.py 中覆盖
     return {
         "s3": s3, "s4": s4, "synergy": synergy, "linear": linear,
         "mb_raw": mb_raw, "pts": pts, "floor": floor,
@@ -150,3 +158,20 @@ def score_both(stock: dict) -> dict:
     r3 = score_3x(stock)
     r2 = score_2x(stock)
     return {**r3, **r2}
+
+
+# ── Regime 感知准入阈值（在 run_backtest.py 中调用）──────────────────
+REGIME_THRESHOLDS = {
+    "R1": {"3x": 0.80, "2x": 0.68},
+    "R2": {"3x": 0.80, "2x": 0.68},
+    "R3": {"3x": 0.85, "2x": 0.75},
+    "R4": {"3x": None, "2x": None},  # None = 禁止开新仓
+}
+
+def apply_regime_thresholds(scores: dict, regime: str) -> dict:
+    thresholds = REGIME_THRESHOLDS.get(regime, REGIME_THRESHOLDS["R2"])
+    t3 = thresholds["3x"]
+    t2 = thresholds["2x"]
+    scores["pass_3x"] = (t3 is not None) and (scores["mb_score_3x"] >= t3)
+    scores["pass_2x"] = (t2 is not None) and (scores["mb_score_2x"] >= t2)
+    return scores
