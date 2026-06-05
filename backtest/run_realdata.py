@@ -13,12 +13,14 @@ from pathlib import Path
 DATA_DIR   = Path(__file__).parent / 'data'
 DAILY_FILE = DATA_DIR / 'daily_all.parquet'
 
-# 最优参数 (2仓模式)
+# 最优参数 V5 (单仓+广度过滤)
 BEST_PARAMS = dict(
-    trend_window=20, min_r2=0.4, min_slope=0.0002,
+    trend_window=20, min_r2=0.3, min_slope=0.0002,
     ma_price_filter=20, min_hold=3,
-    ma_stop=20, ma_stop_pct=0.07,
-    switch_ratio=2.5, mkt_ma=0,
+    ma_stop=20, ma_stop_pct=0.10,
+    switch_ratio=2.5,
+    breadth_min=0.10, bear_stop_mult=1.5,
+    mkt_ma=0,
 )
 
 INITIAL = 1_000_000
@@ -71,7 +73,7 @@ def run_with_real_data():
         if not p_slice:
             continue
 
-        res = run_backtest_multi(p_slice, v_slice, n_positions=2,
+        res = run_backtest_multi(p_slice, v_slice, n_positions=1,
                                  initial_capital=INITIAL, **BEST_PARAMS)
         s   = compute_stats(res, INITIAL)
         if not s: continue

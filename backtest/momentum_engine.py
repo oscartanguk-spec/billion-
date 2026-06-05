@@ -218,6 +218,13 @@ def run_backtest_multi(
     ma_stop=20, ma_stop_pct=0.07,
     switch_ratio=2.5,
     mkt_ma=0, mkt_pct_stocks=0.30,
+    # 回调入场
+    pullback_ma=0, pullback_lo=-0.04, pullback_hi=0.03,
+    # 动量广度过滤: 股票池中有效趋势股票数占比 < breadth_min 时停止建仓并紧止损
+    # 0 = 关闭
+    breadth_min=0.0,
+    # 熊市紧止损倍数 (breadth不足时 stop_pct 乘以此值)
+    bear_stop_mult=1.0,
     initial_capital=1_000_000,
 ):
     """
@@ -234,6 +241,7 @@ def run_backtest_multi(
     sc_mat   = score_matrix(arr, trend_window, min_r2, min_slope)
     ma20_mat = _ma(arr, ma_price_filter)
     stop_mat = _ma(arr, ma_stop)
+    pb_ma_mat = _ma(arr, pullback_ma) if pullback_ma > 0 else None
     if mkt_ma > 0:
         mkt_ma_mat = _ma(arr, mkt_ma)
     else:
@@ -295,7 +303,26 @@ def run_backtest_multi(
 
         # 有效候选: 趋势得分>0 且 价格>MA20
         valid = (sc_today > 0) & (pt > ma20)
-        valid_scores = np.where(valid, sc_today, 0.0)
+
+        # 动量广度: 计算有效趋势股票比例
+        breadth = float(valid.mean())
+        market_ok = (breadth_min <= 0) or (breadth >= breadth_min)
+
+        # 回调入场过滤
+        if pb_ma_mat is not None:
+            pb_ma = pb_ma_mat[day]
+            with np.errstate(invalid='ignore', divide='ignore'):
+                rel = np.where(pb_ma > 0, pt / pb_ma - 1.0, -1.0)
+            pb_ok = (rel >= pullback_lo) & (rel <= pullback_hi)
+            entry_valid = valid & pb_ok
+        else:
+            entry_valid = valid
+
+        valid_scores = np.where(entry_valid & market_ok, sc_today, 0.0)
+        hold_scores  = np.where(valid, sc_today, 0.0)
+
+        # 熊市紧止损
+        eff_stop_pct = ma_stop_pct * bear_stop_mult if (not market_ok and bear_stop_mult > 1) else ma_stop_pct
 
         # 当前持仓集合
         held_set = set(slot_idx[s] for s in range(n_positions) if slot_idx[s] is not None)
@@ -305,7 +332,7 @@ def run_backtest_multi(
             idx = slot_idx[s]
             if idx is None: continue
             if (day - slot_buy_day[s]) < 1: continue
-            if float(pt[idx]) < float(stop_ln[idx]) * (1 - ma_stop_pct):
+            if float(pt[idx]) < float(stop_ln[idx]) * (1 - eff_stop_pct):
                 sell_slot(s, day, 'ma_stop')
 
         # ── 换仓: 找未持仓中得分最高的 top-N ─────────────────────────
@@ -315,8 +342,8 @@ def run_backtest_multi(
             if idx is None: continue
             if (day - slot_buy_day[s]) < min_hold: continue
 
-            curr_score = float(sc_today[idx])
-            # 排除当前所有持仓，找最强候选
+            curr_score = float(hold_scores[idx])
+            # 场外最强候选 (满足回调条件的)
             excl = set(slot_idx[ss] for ss in range(n_positions) if slot_idx[ss] is not None)
             excl_scores = valid_scores.copy()
             for ei in excl:
@@ -324,11 +351,11 @@ def run_backtest_multi(
             best_outside = int(np.argmax(excl_scores))
             best_out_sc  = float(excl_scores[best_outside])
 
-            if best_out_sc > curr_score * switch_ratio and market_is_bull:
+            if best_out_sc > curr_score * switch_ratio and market_is_bull and market_ok:
                 sell_slot(s, day, 'switch')
 
         # ── 建仓: 填满空闲仓位 ────────────────────────────────────────
-        if market_is_bull:
+        if market_is_bull and market_ok:
             for s in range(n_positions):
                 if slot_idx[s] is not None: continue
                 # 不选已被其他槽持有的

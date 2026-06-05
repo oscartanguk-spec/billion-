@@ -13,17 +13,21 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# ─── 策略参数 (已优化) ─────────────────────────────────────────────────────
+# ─── 策略参数 V5 最优 ──────────────────────────────────────────────────────
 TREND_WINDOW    = 20      # 趋势计算窗口
-MIN_R2          = 0.4     # 最低趋势拟合度
+MIN_R2          = 0.3     # 最低趋势拟合度 (V5优化: 0.3 比 0.4 更好)
 MIN_SLOPE       = 0.0002  # 最低斜率 0.02%/天
 MA_FILTER       = 20      # 价格需在MA20上方
 MA_STOP         = 20      # 止损均线
-MA_STOP_PCT     = 0.07    # 跌破止损线7%触发
+MA_STOP_PCT     = 0.10    # 跌破止损线10%触发 (V5优化: 更宽止损减少噪音)
 SWITCH_RATIO    = 2.5     # 换仓倍数
 MIN_HOLD        = 3       # 最短持仓天数
-N_POSITIONS     = 2       # 同时持仓数 (2仓最优)
+N_POSITIONS     = 1       # 单仓集中持有 (V5优化: 集中胜过分散)
 MIN_VOLUME      = 5e6     # 日均成交金额最低5000万
+
+# 动量广度过滤 (V5新增): 股票池中满足趋势条件的比例
+# 低于此阈值时停止建仓 (市场转弱信号)
+BREADTH_MIN     = 0.10    # 10%的股票有有效趋势才可建仓
 
 TUSHARE_TOKEN = os.environ.get(
     'TUSHARE_TOKEN',
@@ -164,13 +168,17 @@ def load_from_cache(n_days_back=60):
     return df[df['trade_date'] >= cutoff], df['trade_date'].max()
 
 
-def generate_signal(candidates, state):
+def generate_signal(candidates, state, market_ok=True):
     """
     根据候选股列表和当前持仓状态, 生成明日操作信号
+    market_ok: 市场广度是否充足 (False时收紧止损, 不建新仓)
     返回 signals: list of {'action', 'ts_code', 'name', 'reason'}
     """
     signals = []
     current_positions = {p['ts_code']: p for p in state.get('positions', [])}
+
+    # 熊市时收紧止损
+    eff_stop_pct = MA_STOP_PCT * 1.5 if not market_ok else MA_STOP_PCT
 
     # 1. 检查现有持仓是否需要止损
     for code, pos in current_positions.items():
@@ -178,15 +186,16 @@ def generate_signal(candidates, state):
         if candidate is None:
             # 今天没有数据 (停牌?) → 继续持有
             continue
-        if candidate['close'] < candidate['stop_line']:
+        eff_stop_line = candidate['ma_stop'] * (1 - eff_stop_pct)
+        if candidate['close'] < eff_stop_line:
             signals.append({
                 'action': '🔴 止损卖出',
                 'ts_code': code,
                 'name':    candidate['name'],
                 'close':   candidate['close'],
-                'stop_line': candidate['stop_line'],
-                'reason':  f"收盘 {candidate['close']:.2f} < 止损线 {candidate['stop_line']:.2f} "
-                           f"(MA{MA_STOP}×{1-MA_STOP_PCT})",
+                'stop_line': eff_stop_line,
+                'reason':  f"收盘 {candidate['close']:.2f} < 止损线 {eff_stop_line:.2f} "
+                           f"(MA{MA_STOP}×{1-eff_stop_pct:.2f}{'熊市紧止' if not market_ok else ''})",
                 'score':   candidate['score'],
             })
 
@@ -225,7 +234,9 @@ def generate_signal(candidates, state):
                         'switch_to': best_outside,
                     })
 
-    # 3. 空仓建仓
+    # 3. 空仓建仓 (仅在广度充足时)
+    if not market_ok:
+        return signals  # 弱势/熊市: 只止损, 不建新仓
     n_empty = N_POSITIONS - len(remaining) - len([s for s in signals if s['action'] == '🔄 换仓'])
     held_and_switching = set(remaining.keys()) | {s['ts_code'] for s in signals}
     buy_cands = [c for c in candidates if c['ts_code'] not in held_and_switching]
@@ -265,7 +276,10 @@ def print_report(candidates, signals, scan_date):
           f"止损MA{MA_STOP}×{1-MA_STOP_PCT}  换仓{SWITCH_RATIO}x")
     print("=" * 72)
 
-    print(f"\n  📊 候选股 TOP 10 (得分排序, 共 {len(candidates)} 只通过过滤):")
+    # 广度指标
+    print(f"\n  📊 市场广度: {len(candidates)} 只通过趋势过滤  "
+          f"({'✅ 广度充足，可操作' if len(candidates) >= BREADTH_MIN * 100 else '⚠️ 广度不足，谨慎建仓'})")
+    print(f"     候选TOP 10 (得分排序):")
     print(f"  {'#':>3} {'代码':>12} {'名称':>8} {'收盘':>7} {'斜率/天':>8} {'R²':>5} "
           f"{'得分':>7} {'日均亿':>6}")
     print("  " + "-" * 64)
@@ -276,7 +290,7 @@ def print_report(candidates, signals, scan_date):
               f"{c['slope_pct']:>7.3f}% {c['r2']:>5.2f} {c['score']:>7.4f} "
               f"{c['avg_amt_w']:>6.1f}{held_mark}")
 
-    print(f"\n  📋 明日操作信号 ({N_POSITIONS}仓策略):")
+    print(f"\n  📋 明日操作信号 (单仓集中策略):")
     print("  " + "-" * 64)
     for s in signals:
         print(f"  {s['action']}  {s.get('ts_code',''):>12} {s.get('name',''):>8}  "
@@ -288,9 +302,10 @@ def print_report(candidates, signals, scan_date):
 
     print()
     print("  ⚠ 注意:")
-    print("    · 以上信号基于今日收盘数据，明日开盘执行")
+    print("    · 以上信号基于今日收盘数据，明日开盘执行 (A股T+1)")
     print("    · 请在开盘集合竞价前确认信号仍然有效")
-    print("    · 最大仓位: 每仓 50% (共 2 仓)")
+    print("    · 单仓策略: 全仓持有得分最高股")
+    print(f"    · 广度低于{BREADTH_MIN*100:.0f}%时停止建仓，等待市场企稳")
     print("=" * 72)
 
 
@@ -320,13 +335,17 @@ def main():
 
     # 扫描
     candidates = scan_today(today_df, lookback)
-    print(f"  通过过滤: {len(candidates)} 只")
+    total_stocks = today_df['ts_code'].nunique()
+    breadth = len(candidates) / max(total_stocks, 1)
+    market_ok = breadth >= BREADTH_MIN
+    print(f"  通过过滤: {len(candidates)} 只 / {total_stocks} 只  广度={breadth:.1%}  "
+          f"{'✅牛市' if market_ok else '⚠️弱势/熊市'}")
 
     # 读取持仓状态
     state = load_state()
 
     # 生成信号
-    signals = generate_signal(candidates, state)
+    signals = generate_signal(candidates, state, market_ok=market_ok)
 
     # 打印报告
     print_report(candidates, signals, scan_date)
