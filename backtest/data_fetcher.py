@@ -1,9 +1,10 @@
 """
-A股全市场数据下载器 — Tushare版
-用法: python backtest/data_fetcher.py
+创业板/科创板数据下载器 — Tushare版
+目标股票池: 创业板(300xxx.SZ) + 科创板(688xxx.SH)
+用法: python backtest/data_fetcher.py [--all]
 结果保存到: backtest/data/
 """
-import os, time, json, math
+import os, time, json
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -20,8 +21,15 @@ START_DATE = '20200101'   # 5年数据
 END_DATE   = '20251231'
 MIN_TRADE_DAYS = 250      # 过滤掉数据太少的股票
 
-# Tushare 免费账户: 每分钟约60次; 积分500+账户无限制
-REQ_INTERVAL = 0.05       # 秒, 付费账户可设0.02
+# Tushare 请求间隔 (积分500+可设0.02s, 免费用0.2s)
+REQ_INTERVAL = 0.05
+
+# 目标板块过滤
+# 创业板: 300xxx.SZ
+# 科创板: 688xxx.SH
+# 主板: 全部 (传入 --all 参数)
+GEM_PREFIXES  = ('300',)    # 创业板
+STAR_PREFIXES = ('688',)    # 科创板
 
 
 def get_pro():
@@ -33,21 +41,45 @@ def get_pro():
         raise RuntimeError("请先安装: pip install tushare")
 
 
-def fetch_stock_list(pro) -> pd.DataFrame:
-    """获取全A股股票列表 (过滤ST)"""
+def fetch_stock_list(pro, target: str = 'gem') -> pd.DataFrame:
+    """
+    获取股票列表
+    target: 'gem'  = 创业板+科创板 (默认)
+            'all'  = 全A股
+            'main' = 主板
+    """
     dfs = []
     for exchange in ['SSE', 'SZSE']:
         df = pro.stock_basic(
             exchange=exchange, list_status='L',
             fields='ts_code,name,industry,market,list_date'
         )
-        dfs.append(df)
+        if df is not None and len(df) > 0:
+            dfs.append(df)
         time.sleep(0.1)
+
+    if not dfs:
+        raise RuntimeError("股票列表获取失败，请检查网络和token")
     all_stocks = pd.concat(dfs, ignore_index=True)
 
     # 过滤ST/退市
-    mask = ~all_stocks['name'].str.contains('ST|退', na=False)
-    all_stocks = all_stocks[mask].reset_index(drop=True)
+    all_stocks = all_stocks[~all_stocks['name'].str.contains('ST|退', na=False)]
+
+    # 按板块过滤
+    if target == 'gem':
+        gem_mask  = all_stocks['ts_code'].str.startswith(GEM_PREFIXES)
+        star_mask = all_stocks['ts_code'].str.startswith(STAR_PREFIXES)
+        all_stocks = all_stocks[gem_mask | star_mask]
+        print(f"  目标: 创业板+科创板 共 {len(all_stocks)} 只")
+    elif target == 'main':
+        gem_mask  = all_stocks['ts_code'].str.startswith(GEM_PREFIXES)
+        star_mask = all_stocks['ts_code'].str.startswith(STAR_PREFIXES)
+        all_stocks = all_stocks[~(gem_mask | star_mask)]
+        print(f"  目标: 主板 共 {len(all_stocks)} 只")
+    else:
+        print(f"  目标: 全A股 共 {len(all_stocks)} 只")
+
+    all_stocks = all_stocks.reset_index(drop=True)
     print(f"  股票池: {len(all_stocks)} 只 (已过滤ST)")
     return all_stocks
 
@@ -79,8 +111,11 @@ def fetch_adj_factor(pro, ts_code: str, start: str, end: str) -> Optional[pd.Dat
         return None
 
 
-def download_all(force_refresh: bool = False):
-    """主下载函数"""
+def download_all(force_refresh: bool = False, target: str = 'gem'):
+    """
+    主下载函数
+    target: 'gem'=创业板+科创板(推荐), 'all'=全A股, 'main'=主板
+    """
     DATA_DIR.mkdir(exist_ok=True)
     pro = get_pro()
 
@@ -89,8 +124,8 @@ def download_all(force_refresh: bool = False):
         stocks = pd.read_csv(STOCK_LIST_FILE)
         print(f"加载股票列表: {len(stocks)} 只")
     else:
-        print("下载股票列表...")
-        stocks = fetch_stock_list(pro)
+        print(f"下载股票列表 (目标: {target})...")
+        stocks = fetch_stock_list(pro, target=target)
         stocks.to_csv(STOCK_LIST_FILE, index=False)
 
     # 加载进度
@@ -188,9 +223,17 @@ def load_price_dict(start_date: str = '20220101', end_date: str = '20251231',
 
 if __name__ == '__main__':
     import sys
-    force = '--force' in sys.argv
+    force  = '--force' in sys.argv
+    target = 'all' if '--all' in sys.argv else ('main' if '--main' in sys.argv else 'gem')
     print("=" * 60)
     print("  A股日线数据下载器")
-    print(f"  范围: {START_DATE} ~ {END_DATE}")
+    print(f"  目标板块: {target}  范围: {START_DATE} ~ {END_DATE}")
     print("=" * 60)
-    download_all(force_refresh=force)
+    print()
+    print("  推荐用法:")
+    print("    创业板+科创板 (默认推荐):  python backtest/data_fetcher.py")
+    print("    全A股:                    python backtest/data_fetcher.py --all")
+    print("    主板:                     python backtest/data_fetcher.py --main")
+    print("    强制重新下载:             python backtest/data_fetcher.py --force")
+    print()
+    download_all(force_refresh=force, target=target)
