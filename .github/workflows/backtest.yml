@@ -1,0 +1,63 @@
+name: 运行回测分析
+
+on:
+  # 手动触发
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: '回测模式'
+        required: false
+        default: 'sim'
+        type: choice
+        options:
+          - sim        # 使用模拟数据（无需 Tushare）
+          - real       # 使用真实数据（需先运行 fetch_data workflow）
+
+  # 数据更新后自动触发回测
+  push:
+    paths:
+      - 'backtest/data/daily_all.parquet'
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: claude/astock-trend-trading-strategy-Kzv0I
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install pandas pyarrow numpy --quiet
+
+      - name: Run backtest
+        run: |
+          MODE="${{ github.event.inputs.mode || 'sim' }}"
+          echo "回测模式: $MODE"
+
+          if [ "$MODE" = "real" ] && [ -f backtest/data/daily_all.parquet ]; then
+            python backtest/run_realdata.py 2>&1 | tee backtest_result.txt
+          else
+            python backtest/run_realdata.py --sim 2>&1 | tee backtest_result.txt
+          fi
+
+      - name: Upload result
+        uses: actions/upload-artifact@v4
+        with:
+          name: backtest-result-${{ github.run_number }}
+          path: backtest_result.txt
+          retention-days: 30
+
+      - name: Print summary
+        run: |
+          echo "## 回测结果摘要" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat backtest_result.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY

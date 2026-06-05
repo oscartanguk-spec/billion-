@@ -1,0 +1,102 @@
+name: 下载创业板/科创板行情数据
+
+on:
+  # 手动触发（在 GitHub Actions 页面点 "Run workflow"）
+  workflow_dispatch:
+    inputs:
+      force:
+        description: '强制重新下载所有数据？'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+      target:
+        description: '目标板块'
+        required: false
+        default: 'gem'
+        type: choice
+        options:
+          - gem      # 创业板+科创板（推荐）
+          - all      # 全A股（更慢）
+          - main     # 主板
+
+  # 每天早上 8:00（北京时间）自动更新
+  schedule:
+    - cron: '0 0 * * 1-5'   # UTC 00:00 = 北京 08:00，周一到周五
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write       # 需要写入权限才能提交数据
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          ref: claude/astock-trend-trading-strategy-Kzv0I
+          fetch-depth: 1
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install tushare pandas pyarrow numpy --quiet
+
+      - name: Download market data
+        env:
+          TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
+        run: |
+          TARGET="${{ github.event.inputs.target || 'gem' }}"
+          FORCE="${{ github.event.inputs.force || 'false' }}"
+
+          echo "==========================="
+          echo "目标板块: $TARGET"
+          echo "强制刷新: $FORCE"
+          echo "==========================="
+
+          if [ "$FORCE" = "true" ]; then
+            python backtest/data_fetcher.py --force --$TARGET 2>&1 || \
+            python backtest/data_fetcher.py --force 2>&1
+          else
+            python backtest/data_fetcher.py 2>&1
+          fi
+
+      - name: Check data size
+        run: |
+          if [ -f backtest/data/daily_all.parquet ]; then
+            SIZE=$(du -sh backtest/data/daily_all.parquet | cut -f1)
+            STOCKS=$(python -c "
+          import pandas as pd
+          df = pd.read_parquet('backtest/data/daily_all.parquet')
+          print(f'{df.ts_code.nunique()} 只股票, {len(df):,} 条记录')
+          print(f'日期范围: {df.trade_date.min().date()} ~ {df.trade_date.max().date()}')
+          ")
+            echo "数据文件大小: $SIZE"
+            echo "$STOCKS"
+          else
+            echo "❌ 数据文件未生成，请检查 Tushare Token"
+            exit 1
+          fi
+
+      - name: Commit and push data
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # 将大文件用 git lfs 或直接提交（parquet 压缩后通常 < 100MB）
+          git add backtest/data/daily_all.parquet
+          git add backtest/data/stock_list.csv
+          git add backtest/data/fetch_meta.json || true
+
+          # 只有有变化才提交
+          git diff --cached --quiet && echo "数据无更新，跳过提交" || \
+          git commit -m "Auto update: 创业板/科创板行情数据 $(date '+%Y-%m-%d')"
+
+          git push origin claude/astock-trend-trading-strategy-Kzv0I
