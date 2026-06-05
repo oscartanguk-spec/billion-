@@ -60,13 +60,15 @@ def run_backtest(
     min_hold=10,
     ma_stop=20, ma_stop_pct=0.03,
     switch_ratio=3.5,
+    # 大盘择时参数
+    mkt_ma=50,          # 大盘均线窗口 (0=关闭择时)
+    mkt_pct_stocks=0.3, # 至少30%个股在均线上才认为是牛市
     initial_capital=1_000_000,
 ):
     codes, arr, vol_arr = build_arrays(prices, volumes)
     n_days, n_stocks = arr.shape
     n_days -= 1
 
-    # vol_arr may have one fewer row than arr (no initial day); pad with first row
     if vol_arr.shape[0] < arr.shape[0]:
         vol_arr = np.vstack([vol_arr[:1], vol_arr])
 
@@ -75,6 +77,11 @@ def run_backtest(
     ma20_mat = _ma(arr, ma_price_filter)
     stop_mat = _ma(arr, ma_stop)
     vma_mat  = _ma(vol_arr, 20)
+    # 大盘择时: 用全体股票的长期均线来判断牛熊
+    if mkt_ma > 0:
+        mkt_ma_mat = _ma(arr, mkt_ma)   # (n_days+1, n_stocks)
+    else:
+        mkt_ma_mat = None
 
     cash = float(initial_capital)
     pos_idx = None; pos_shares = 0; pos_cost = 0.0; buy_day = -999
@@ -100,11 +107,18 @@ def run_backtest(
         cash -= max_sh * price * (1 + COMMISSION)
         pos_idx = idx; pos_shares = max_sh; pos_cost = price; buy_day = day
 
-    for day in range(trend_window, n_days + 1):
+    for day in range(max(trend_window, mkt_ma if mkt_ma > 0 else 0), n_days + 1):
         sc_today = sc_mat[day]; sc_prev = sc_mat[max(0, day - 1)]
         pt = arr[day]; ma10 = ma10_mat[day]; ma20 = ma20_mat[day]
         stop_line = stop_mat[day]; vol = vol_arr[day] if day < vol_arr.shape[0] else np.ones(n_stocks)
         vma = vma_mat[day]
+
+        # 大盘择时: 统计多少股票价格在长期均线之上
+        if mkt_ma_mat is not None:
+            above_mkt_ma = float((pt > mkt_ma_mat[day]).mean())
+            market_is_bull = (above_mkt_ma >= mkt_pct_stocks)
+        else:
+            market_is_bull = True
 
         valid = (sc_today > 0) & (pt > ma20)
 
@@ -122,14 +136,20 @@ def run_backtest(
             if float(pt[pos_idx]) < float(stop_line[pos_idx]) * (1 - ma_stop_pct):
                 need_stop = True
         if need_stop:
-            do_sell(pos_idx, day, 'ma_stop')
+            do_sell(pos_idx, day, 'mkt_stop' if not market_is_bull else 'ma_stop')
+
+        # 熊市: 持仓止损后不再建新仓
+        if (not need_stop and not market_is_bull and pos_idx is not None and (day - buy_day) >= 1):
+            if float(pt[pos_idx]) < float(stop_line[pos_idx]) * (1 - ma_stop_pct * 0.5):
+                do_sell(pos_idx, day, 'bear_stop')
 
         if (not need_stop and pos_idx is not None and (day - buy_day) >= min_hold
                 and all_bs > 0 and all_best != pos_idx):
             if all_bs > float(sc_today[pos_idx]) * switch_ratio:
                 do_sell(pos_idx, day, 'switch')
 
-        if pos_idx is None and best_es > 0:
+        # 只在牛市（或无过滤）时建仓
+        if pos_idx is None and best_es > 0 and market_is_bull:
             do_buy(best_e, day)
 
         equity = (cash + pos_shares * float(pt[pos_idx])) if pos_idx is not None else cash
